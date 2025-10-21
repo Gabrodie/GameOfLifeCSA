@@ -6,6 +6,8 @@ import (
 	"uk.ac.bris.cs/gameoflife/util"
 )
 
+//test comment
+
 type distributorChannels struct {
 	events     chan<- Event
 	ioCommand  chan<- ioCommand
