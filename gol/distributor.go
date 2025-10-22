@@ -17,6 +17,13 @@ type distributorChannels struct {
 	ioInput    <-chan uint8
 }
 
+// new struct so workers can send both their section, flipped and which row they started at
+type workerResult struct {
+	section [][]uint8
+	flipped []util.Cell
+	startY  int
+}
+
 // distributor divides the work between workers and interacts with other goroutines.
 func distributor(p Params, c distributorChannels) {
 
@@ -36,12 +43,41 @@ func distributor(p Params, c distributorChannels) {
 
 	// TODO: Execute all turns of the Game of Life.
 	for turn := 0; turn < p.Turns; turn++ {
-		var flipped []util.Cell
-		world, flipped = CalculateNextState(world)
-		if len(flipped) > 0 {
-			c.events <- CellsFlipped{CompletedTurns: turn + 1, Cells: flipped}
+
+		// find how many rows each thread should get. this might not be correct due to int. div but next part fixes
+		rowsPerThread := p.ImageHeight / p.Threads
+		results := make(chan workerResult, p.Threads)
+
+		for t := 0; t < p.Threads; t++ {
+			startRow := t * rowsPerThread
+			endRow := (t + 1) * rowsPerThread
+			if t == p.Threads-1 {
+				// if p.ImageHeight not divisble by number of threads set last thread to take last row, otherwise last few rows wont get any worker
+				endRow = p.ImageHeight
+			}
+			go worker(startRow, endRow, world, p.ImageWidth, p.ImageHeight, results)
 		}
 
+		newWorld := make([][]uint8, p.ImageHeight)
+
+		var allFlipped []util.Cell
+		// collect results from workers and create new world
+		for t := 0; t < p.Threads; t++ {
+			// read each section from the channel
+			workerResults := <-results
+			for i := range workerResults.section {
+				/* iterate through the worker's rows. So if worker handled rows 10–15 then
+				newWorld[10 + 0] = section[0]
+				newWorld[10 + 1] = section[1] etc*/
+				newWorld[workerResults.startY+i] = workerResults.section[i]
+			}
+			allFlipped = append(allFlipped, workerResults.flipped...)
+		}
+
+		if len(allFlipped) > 0 {
+			c.events <- CellsFlipped{CompletedTurns: turn + 1, Cells: allFlipped}
+		}
+		world = newWorld
 		c.events <- TurnComplete{CompletedTurns: turn + 1}
 	}
 
@@ -60,6 +96,51 @@ func distributor(p Params, c distributorChannels) {
 
 	// Close the channel to stop the SDL goroutine gracefully. Removing may cause deadlock.
 	close(c.events)
+}
+
+// each worker takes their own chunk of rows and processes them
+func worker(startRow int, endRow int, world [][]uint8, width int, height int, result chan<- workerResult) {
+	newSection := make([][]uint8, endRow-startRow)
+	var flipped []util.Cell
+
+	// same logic in CalculateNextState()
+	for y := startRow; y < endRow; y++ {
+		newSection[y-startRow] = make([]uint8, width)
+		for x := 0; x < width; x++ {
+			aliveNeighbors := countAliveNeighbors(world, x, y, width, height)
+			current := world[y][x]
+			next := current
+
+			if current != 0 {
+				// Cell is currently active
+				if aliveNeighbors < 2 {
+					next = 0
+				} else if aliveNeighbors == 2 || aliveNeighbors == 3 {
+					next = 255
+				} else {
+					next = 0
+				}
+			} else {
+				// dead cell
+				if aliveNeighbors == 3 {
+					next = 255
+				} else {
+					next = 0
+				}
+			}
+
+			if next != current {
+				flipped = append(flipped, util.Cell{X: x, Y: y})
+			}
+			newSection[y-startRow][x] = next
+		}
+	}
+	// send results to the channel
+	result <- workerResult{
+		section: newSection,
+		flipped: flipped,
+		startY:  startRow,
+	}
 }
 
 func CalculateNextState(world [][]uint8) ([][]uint8, []util.Cell) {
