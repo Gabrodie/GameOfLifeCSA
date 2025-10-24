@@ -2,6 +2,7 @@ package gol
 
 import (
 	"fmt"
+	"time"
 
 	"uk.ac.bris.cs/gameoflife/util"
 )
@@ -41,6 +42,43 @@ func distributor(p Params, c distributorChannels) {
 	turn := 0
 	c.events <- StateChange{turn, Executing}
 
+	// ticker function
+	aliveCountChan := make(chan AliveCellsCount, 1)
+	done := make(chan struct{})
+	ticker := time.NewTicker(2 * time.Second)
+
+	// Ticker goroutine sends AliveCellsCount events every 2 seconds
+	go func() {
+		defer ticker.Stop()
+
+		// store latest turn and alive count known by ticker
+		currentTurn := 0
+		currentAlive := len(calculateAliveCells(world)) // initial world count
+
+		for {
+			select {
+			case <-done:
+				return
+
+			case <-ticker.C:
+				// if new turn info waiting, take it
+				select {
+				case ac := <-aliveCountChan:
+					currentTurn = ac.CompletedTurns
+					currentAlive = ac.CellsCount
+				default:
+				}
+
+				// send AliveCellsCount (non-blocking)
+				select {
+				case c.events <- AliveCellsCount{CompletedTurns: currentTurn, CellsCount: currentAlive}:
+				default:
+					// GUI not ready? drop to avoid deadlock
+				}
+			}
+		}
+	}()
+
 	// TODO: Execute all turns of the Game of Life.
 	for turn := 0; turn < p.Turns; turn++ {
 
@@ -77,9 +115,24 @@ func distributor(p Params, c distributorChannels) {
 		if len(allFlipped) > 0 {
 			c.events <- CellsFlipped{CompletedTurns: turn + 1, Cells: allFlipped}
 		}
+
+		// update world to newly computed world
 		world = newWorld
+
+		// notify GUI turn is done
 		c.events <- TurnComplete{CompletedTurns: turn + 1}
+
+		// send updated alive count for ticker to use
+		alive := len(calculateAliveCells(world))
+		select {
+		case aliveCountChan <- AliveCellsCount{CompletedTurns: turn + 1, CellsCount: alive}:
+		default:
+			// drop if ticker hasn't consumed yet
+		}
 	}
+
+	// stop ticker loop
+	close(done)
 
 	// TODO: Report the final state using FinalTurnCompleteEvent.
 	aliveCells := calculateAliveCells(world)
