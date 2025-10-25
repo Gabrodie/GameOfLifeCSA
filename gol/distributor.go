@@ -142,6 +142,15 @@ func distributor(p Params, c distributorChannels) {
 	}
 
 	// Make sure that the Io has finished any output before exiting.
+	c.ioCommand <- ioOutput
+	c.ioFilename <- fmt.Sprintf("%vx%vx%v", p.ImageWidth, p.ImageHeight, p.Turns)
+	for y := 0; y < p.ImageHeight; y++ {
+		for x := 0; x < p.ImageWidth; x++ {
+			val := world[y][x]
+			c.ioOutput <- val
+		}
+	}
+
 	c.ioCommand <- ioCheckIdle
 	<-c.ioIdle
 
