@@ -1,0 +1,46 @@
+name: Go CI
+
+on:
+  pull_request:
+  push:
+    branches: ["*"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Install SDL2 dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsdl2-dev pkg-config
+
+      - name: Download dependencies
+        run: go mod tidy
+
+      - name: Run test step1
+        run: go test ./tests -v -run "TestGol/-1$"
+
+      - name: Run test step2
+        run: go test ./tests -v -run "TestGol"
+
+      - name: Run test step3
+        run: go test ./tests -v -run "TestAlive"
+
+      - name: Run test step4
+        run: go test ./tests -v -run "TestPgm"
+
+      - name: Run test step5
+        run: go test ./tests -v -run "TestKeyboard"
+
+      - name: Run test step6
+        run: go test ./tests -v -run "TestSdl" && go test ./tests -v -race
+        
