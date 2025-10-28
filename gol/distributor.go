@@ -25,8 +25,16 @@ type workerResult struct {
 	startY  int
 }
 
+// new struct to hold all info after completed turns
+type turnData struct {
+	CompletedTurns int
+	CellsCount     int
+	world          [][]uint8
+	Alive          []util.Cell
+}
+
 // distributor divides the work between workers and interacts with other goroutines.
-func distributor(p Params, c distributorChannels) {
+func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 
 	// TODO: Create a 2D slice to store the world.
 	c.ioCommand <- ioInput
@@ -39,16 +47,18 @@ func distributor(p Params, c distributorChannels) {
 		}
 	}
 
-	turn := 0
-	c.events <- StateChange{turn, Executing}
+	c.events <- StateChange{0, Executing}
 
-	// ticker function
-	aliveCountChan := make(chan AliveCellsCount, 1)
-	done := make(chan struct{})
-	ticker := time.NewTicker(2 * time.Second)
+	// channels used for sharing the latest snapshot with ticker and keypress goroutine
+	snapshotTicker := make(chan turnData, 1) // ticker reads latest snapshot
+	snapshotKey := make(chan turnData, 1)    // keypress goroutine reads latest snapshot for save/quit
+	quitReq := make(chan struct{}, 1)        // keypress signals quit to main loop
+	done := make(chan struct{})              // closed by main once simulation finishes
+	pauseReq := make(chan bool, 1)           // unimplemented: can be used to signal pause/resume
 
 	// Ticker goroutine sends AliveCellsCount events every 2 seconds
 	go func() {
+		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
 
 		// store latest turn and alive count known by ticker
@@ -63,7 +73,7 @@ func distributor(p Params, c distributorChannels) {
 			case <-ticker.C:
 				// if new turn info waiting, take it
 				select {
-				case ac := <-aliveCountChan:
+				case ac := <-snapshotTicker:
 					currentTurn = ac.CompletedTurns
 					currentAlive = ac.CellsCount
 				default:
@@ -79,8 +89,88 @@ func distributor(p Params, c distributorChannels) {
 		}
 	}()
 
+	// keyPresses handling goroutine: handles pause/save/quit using latest snapshot
+	go func() {
+		paused := false
+		var latestSnapshot turnData
+		for {
+			select {
+			case data := <-snapshotKey:
+				// update latest snapshot
+				latestSnapshot = data
+			case key := <-keyPresses:
+				// allow toggle pause anytime
+				if key == 'p' {
+					paused = !paused
+					if paused {
+						c.events <- StateChange{latestSnapshot.CompletedTurns, Paused}
+						pauseReq <- true
+
+					} else {
+						c.events <- StateChange{latestSnapshot.CompletedTurns, Executing}
+						pauseReq <- false
+					}
+					continue
+				}
+
+				// when paused, 's' saves and 'q' requests quit; 'q' can also be allowed when not paused if desired
+				if key == 's' {
+					// save state using latestSnapshot.world (deep copy already provided by main)
+					pauseReq <- true
+					c.ioCommand <- ioOutput
+					c.ioFilename <- fmt.Sprintf("%vx%vx%v", p.ImageWidth, p.ImageHeight, latestSnapshot.CompletedTurns)
+					for y := 0; y < p.ImageHeight; y++ {
+						for x := 0; x < p.ImageWidth; x++ {
+							val := latestSnapshot.world[y][x]
+							c.ioOutput <- val
+						}
+					}
+					c.ioCommand <- ioCheckIdle
+					<-c.ioIdle
+					c.events <- ImageOutputComplete{CompletedTurns: latestSnapshot.CompletedTurns, Filename: fmt.Sprintf("%vx%vx%v", p.ImageWidth, p.ImageHeight, latestSnapshot.CompletedTurns)}
+
+					pauseReq <- false
+					continue
+				}
+
+				if key == 'q' {
+					// signal main loop to quit (non-blocking)
+					pauseReq <- true
+					select {
+					case quitReq <- struct{}{}:
+					default:
+					}
+					return
+				}
+			default:
+				// small sleep to avoid busy loop when idle
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
+	}()
+
 	// TODO: Execute all turns of the Game of Life.
+	latestTurn := 0
 	for turn := 0; turn < p.Turns; turn++ {
+		var quit bool
+
+		// check for quit request
+		select {
+		case pause := <-pauseReq:
+			for pause {
+				// wait here until unpaused
+				select {
+				case pause = <-pauseReq:
+				case <-quitReq:
+					quit = true
+					pause = false
+				}
+			}
+		default:
+		}
+		if quit {
+			break
+		}
 
 		// find how many rows each thread should get. this might not be correct due to int. div but next part fixes
 		rowsPerThread := p.ImageHeight / p.Threads
@@ -122,28 +212,45 @@ func distributor(p Params, c distributorChannels) {
 		// notify GUI turn is done
 		c.events <- TurnComplete{CompletedTurns: turn + 1}
 
-		// send updated alive count for ticker to use
-		alive := len(calculateAliveCells(world))
+		// send updated alive count for ticker and latest snapshot for keypress
+		alive := calculateAliveCells(world)
+		// create deep copy of world for safe sharing
+		worldCopy := copyWorld(world)
+		snap := turnData{CompletedTurns: turn + 1, CellsCount: len(alive), world: worldCopy, Alive: alive}
+		latestTurn = turn + 1
+
+		// non-blocking updates to ticker and keypress snapshot channels
 		select {
-		case aliveCountChan <- AliveCellsCount{CompletedTurns: turn + 1, CellsCount: alive}:
+		case snapshotTicker <- snap:
 		default:
-			// drop if ticker hasn't consumed yet
+		}
+		select {
+		case snapshotKey <- snap:
+		default:
 		}
 	}
 
-	// stop ticker loop
+	// if quit was requested inside the loop, drain and proceed to shutdown
+	select {
+	case <-quitReq:
+		// proceed to finalization below
+	default:
+	}
+
+	// stop ticker goroutine
 	close(done)
 
 	// TODO: Report the final state using FinalTurnCompleteEvent.
 	aliveCells := calculateAliveCells(world)
 	c.events <- FinalTurnComplete{
-		CompletedTurns: turn,
+		CompletedTurns: latestTurn,
 		Alive:          aliveCells,
 	}
 
 	// Make sure that the Io has finished any output before exiting.
+	// Send the final image to the io goroutine.
 	c.ioCommand <- ioOutput
-	c.ioFilename <- fmt.Sprintf("%vx%vx%v", p.ImageWidth, p.ImageHeight, p.Turns)
+	c.ioFilename <- fmt.Sprintf("%vx%vx%v", p.ImageWidth, p.ImageHeight, latestTurn)
 	for y := 0; y < p.ImageHeight; y++ {
 		for x := 0; x < p.ImageWidth; x++ {
 			val := world[y][x]
@@ -151,13 +258,36 @@ func distributor(p Params, c distributorChannels) {
 		}
 	}
 
+	// Wait for the io goroutine to finish.
 	c.ioCommand <- ioCheckIdle
 	<-c.ioIdle
 
-	c.events <- StateChange{turn, Quitting}
+	// Notify the GUI that the image output is complete.
+	c.events <- ImageOutputComplete{CompletedTurns: latestTurn, Filename: fmt.Sprintf("%vx%vx%v", p.ImageWidth, p.ImageHeight, latestTurn)}
+
+	// Notify the GUI that we are quitting.
+	c.events <- StateChange{latestTurn, Quitting}
 
 	// Close the channel to stop the SDL goroutine gracefully. Removing may cause deadlock.
 	close(c.events)
+}
+
+// helper: deep-copy a world to avoid data races when sharing snapshots between goroutines
+func copyWorld(src [][]uint8) [][]uint8 {
+	if src == nil {
+		return nil
+	}
+	h := len(src)
+	if h == 0 {
+		return [][]uint8{}
+	}
+	w := len(src[0])
+	dst := make([][]uint8, h)
+	for y := 0; y < h; y++ {
+		dst[y] = make([]uint8, w)
+		copy(dst[y], src[y])
+	}
+	return dst
 }
 
 // each worker takes their own chunk of rows and processes them
