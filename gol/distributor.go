@@ -7,8 +7,6 @@ import (
 	"uk.ac.bris.cs/gameoflife/util"
 )
 
-//test comment
-
 type distributorChannels struct {
 	events     chan<- Event
 	ioCommand  chan<- ioCommand
@@ -46,7 +44,10 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 			world[i][j] = <-c.ioInput
 		}
 	}
-
+	initialAlive := calculateAliveCells(world)
+	if len(initialAlive) > 0 {
+		c.events <- CellsFlipped{CompletedTurns: 0, Cells: initialAlive}
+	}
 	c.events <- StateChange{0, Executing}
 
 	// channels used for sharing the latest snapshot with ticker and keypress goroutine
@@ -63,7 +64,7 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 
 		// store latest turn and alive count known by ticker
 		currentTurn := 0
-		currentAlive := len(calculateAliveCells(world)) // initial world count
+		currentAlive := len(initialAlive) // initial world count
 
 		for {
 			select {
@@ -175,6 +176,7 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 		// find how many rows each thread should get. this might not be correct due to int. div but next part fixes
 		rowsPerThread := p.ImageHeight / p.Threads
 		results := make(chan workerResult, p.Threads)
+		worldCpyWorkers := copyWorld(world)
 
 		for t := 0; t < p.Threads; t++ {
 			startRow := t * rowsPerThread
@@ -183,7 +185,7 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 				// if p.ImageHeight not divisble by number of threads set last thread to take last row, otherwise last few rows wont get any worker
 				endRow = p.ImageHeight
 			}
-			go worker(startRow, endRow, world, p.ImageWidth, p.ImageHeight, results)
+			go worker(startRow, endRow, worldCpyWorkers, p.ImageWidth, p.ImageHeight, results)
 		}
 
 		newWorld := make([][]uint8, p.ImageHeight)
@@ -273,19 +275,20 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 }
 
 // helper: deep-copy a world to avoid data races when sharing snapshots between goroutines
-func copyWorld(src [][]uint8) [][]uint8 {
-	if src == nil {
+// this function was very important to avoid data races. u dont want any of the go routines to read or write directly to world as it is unstable
+func copyWorld(wrld [][]uint8) [][]uint8 {
+	if wrld == nil {
 		return nil
 	}
-	h := len(src)
+	h := len(wrld)
 	if h == 0 {
 		return [][]uint8{}
 	}
-	w := len(src[0])
+	w := len(wrld[0])
 	dst := make([][]uint8, h)
 	for y := 0; y < h; y++ {
 		dst[y] = make([]uint8, w)
-		copy(dst[y], src[y])
+		copy(dst[y], wrld[y])
 	}
 	return dst
 }
