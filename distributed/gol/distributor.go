@@ -3,6 +3,7 @@ package gol
 import (
 	"fmt"
 	"time"
+	"net/rpc"
 
 	"uk.ac.bris.cs/gameoflife/util"
 )
@@ -44,7 +45,7 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 			world[i][j] = <-c.ioInput
 		}
 	}
-	initialAlive := calculateAliveCells(world)
+	initialAlive := CalculateAliveCells(world)
 	if len(initialAlive) > 0 {
 		c.events <- CellsFlipped{CompletedTurns: 0, Cells: initialAlive}
 	}
@@ -152,85 +153,34 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 
 	// TODO: Execute all turns of the Game of Life.
 	latestTurn := 0
-	for turn := 0; turn < p.Turns; turn++ {
-		var quit bool
 
-		// check for quit request
-		select {
-		case pause := <-pauseReq:
-			for pause {
-				// wait here until unpaused
-				select {
-				case pause = <-pauseReq:
-				case <-quitReq:
-					quit = true
-					pause = false
-				}
-			}
-		default:
-		}
-		if quit {
-			break
-		}
-
-		// find how many rows each thread should get. this might not be correct due to int. div but next part fixes
-		rowsPerThread := p.ImageHeight / p.Threads
-		results := make(chan workerResult, p.Threads)
-		worldCpyWorkers := copyWorld(world)
-
-		for t := 0; t < p.Threads; t++ {
-			startRow := t * rowsPerThread
-			endRow := (t + 1) * rowsPerThread
-			if t == p.Threads-1 {
-				// if p.ImageHeight not divisble by number of threads set last thread to take last row, otherwise last few rows wont get any worker
-				endRow = p.ImageHeight
-			}
-			go worker(startRow, endRow, worldCpyWorkers, p.ImageWidth, p.ImageHeight, results)
-		}
-
-		newWorld := make([][]uint8, p.ImageHeight)
-
-		var allFlipped []util.Cell
-		// collect results from workers and create new world
-		for t := 0; t < p.Threads; t++ {
-			// read each section from the channel
-			workerResults := <-results
-			for i := range workerResults.section {
-				/* iterate through the worker's rows. So if worker handled rows 10–15 then
-				newWorld[10 + 0] = section[0]
-				newWorld[10 + 1] = section[1] etc*/
-				newWorld[workerResults.startY+i] = workerResults.section[i]
-			}
-			allFlipped = append(allFlipped, workerResults.flipped...)
-		}
-
-		if len(allFlipped) > 0 {
-			c.events <- CellsFlipped{CompletedTurns: turn + 1, Cells: allFlipped}
-		}
-
-		// update world to newly computed world
-		world = newWorld
-
-		// notify GUI turn is done
-		c.events <- TurnComplete{CompletedTurns: turn + 1}
-
-		// send updated alive count for ticker and latest snapshot for keypress
-		alive := calculateAliveCells(world)
-		// create deep copy of world for safe sharing
-		worldCopy := copyWorld(world)
-		snap := turnData{CompletedTurns: turn + 1, CellsCount: len(alive), world: worldCopy, Alive: alive}
-		latestTurn = turn + 1
-
-		// non-blocking updates to ticker and keypress snapshot channels
-		select {
-		case snapshotTicker <- snap:
-		default:
-		}
-		select {
-		case snapshotKey <- snap:
-		default:
-		}
+	// connect to the AWS server via rpc (localhost for now to test)
+	client, err := rpc.Dial("tcp", "localhost:6000")
+	if err != nil {
+    	panic(err)
 	}
+	defer client.Close()
+
+	// prepare the request struct
+	req := GolRequest{
+    	World:       world,
+    	ImageWidth:  p.ImageWidth,
+    	ImageHeight: p.ImageHeight,
+    	Turns:       p.Turns,
+	}
+	var res GolResponse
+
+	// call the remote function (defined in server.go)
+	err = client.Call("GameOfLifeServer.AdvanceWorld", req, &res)
+	if err != nil {
+    	panic(err)
+	}
+
+	// collect the returned result and continue like usual
+	world = res.World
+	aliveCells := res.Alive
+	latestTurn = p.Turns
+
 
 	// if quit was requested inside the loop, drain and proceed to shutdown
 	select {
@@ -243,7 +193,6 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 	close(done)
 
 	// TODO: Report the final state using FinalTurnCompleteEvent.
-	aliveCells := calculateAliveCells(world)
 	c.events <- FinalTurnComplete{
 		CompletedTurns: latestTurn,
 		Alive:          aliveCells,
@@ -302,7 +251,7 @@ func worker(startRow int, endRow int, world [][]uint8, width int, height int, re
 	for y := startRow; y < endRow; y++ {
 		newSection[y-startRow] = make([]uint8, width)
 		for x := 0; x < width; x++ {
-			aliveNeighbors := countAliveNeighbors(world, x, y, width, height)
+			aliveNeighbors := CountAliveNeighbors(world, x, y, width, height)
 			current := world[y][x]
 			next := current
 
@@ -347,7 +296,7 @@ func CalculateNextState(world [][]uint8) ([][]uint8, []util.Cell) {
 	for y := 0; y < height; y++ {
 		newWorld[y] = make([]uint8, width)
 		for x := 0; x < width; x++ {
-			aliveNeighbors := countAliveNeighbors(world, x, y, width, height)
+			aliveNeighbors := CountAliveNeighbors(world, x, y, width, height)
 			current := world[y][x]
 			next := current
 			if current != 0 {
@@ -378,7 +327,8 @@ func CalculateNextState(world [][]uint8) ([][]uint8, []util.Cell) {
 	return newWorld, flipped
 }
 
-func countAliveNeighbors(world [][]uint8, x, y, width, height int) int {
+//capitalised so they can be exported (both functions below were lowercase previously)
+func CountAliveNeighbors(world [][]uint8, x, y, width, height int) int {
 	sum := 0
 	for dy := -1; dy <= 1; dy++ {
 		for dx := -1; dx <= 1; dx++ {
@@ -395,7 +345,7 @@ func countAliveNeighbors(world [][]uint8, x, y, width, height int) int {
 	return sum
 }
 
-func calculateAliveCells(world [][]uint8) []util.Cell {
+func CalculateAliveCells(world [][]uint8) []util.Cell {
 	var alive []util.Cell
 	for y := 0; y < len(world); y++ {
 		for x := 0; x < len(world[y]); x++ {
