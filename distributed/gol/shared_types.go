@@ -17,3 +17,11 @@ type GolResponse struct {
     World [][]uint8
     Alive []util.Cell
 }
+
+type StatusRequest struct {
+}
+
+type StatusResponse struct {
+    AliveCount int
+    CompletedTurns int
+}

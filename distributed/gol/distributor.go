@@ -35,6 +35,13 @@ type turnData struct {
 // distributor divides the work between workers and interacts with other goroutines.
 func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 
+	// connect to the AWS server via rpc (localhost for now to test)
+	client, err := rpc.Dial("tcp", "localhost:6000")
+	if err != nil {
+    	panic(err)
+	}
+	defer client.Close()
+
 	// TODO: Create a 2D slice to store the world.
 	c.ioCommand <- ioInput
 	c.ioFilename <- fmt.Sprintf("%vx%v", p.ImageWidth, p.ImageHeight)
@@ -52,7 +59,7 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 	c.events <- StateChange{0, Executing}
 
 	// channels used for sharing the latest snapshot with ticker and keypress goroutine
-	snapshotTicker := make(chan turnData, 1) // ticker reads latest snapshot
+	// snapshotTicker := make(chan turnData, 1) // ticker reads latest snapshot
 	snapshotKey := make(chan turnData, 1)    // keypress goroutine reads latest snapshot for save/quit
 	quitReq := make(chan struct{}, 1)        // keypress signals quit to main loop
 	done := make(chan struct{})              // closed by main once simulation finishes
@@ -64,8 +71,8 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 		defer ticker.Stop()
 
 		// store latest turn and alive count known by ticker
-		currentTurn := 0
-		currentAlive := len(initialAlive) // initial world count
+		// currentTurn := 0
+		// currentAlive := len(initialAlive) // initial world count
 
 		for {
 			select {
@@ -73,20 +80,12 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 				return
 
 			case <-ticker.C:
-				// if new turn info waiting, take it
-				select {
-				case ac := <-snapshotTicker:
-					currentTurn = ac.CompletedTurns
-					currentAlive = ac.CellsCount
-				default:
+				var status StatusResponse
+				err := client.Call("GameOfLifeServer.GetStatus", StatusRequest{}, &status)
+				if err == nil{
+					c.events <- AliveCellsCount{CompletedTurns: status.CompletedTurns, CellsCount: status.AliveCount}
 				}
-
-				// send AliveCellsCount (non-blocking)
-				select {
-				case c.events <- AliveCellsCount{CompletedTurns: currentTurn, CellsCount: currentAlive}:
-				default:
-					// GUI not ready? drop to avoid deadlock
-				}
+				
 			}
 		}
 	}()
@@ -153,13 +152,6 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 
 	// TODO: Execute all turns of the Game of Life.
 	latestTurn := 0
-
-	// connect to the AWS server via rpc (localhost for now to test)
-	client, err := rpc.Dial("tcp", "localhost:6000")
-	if err != nil {
-    	panic(err)
-	}
-	defer client.Close()
 
 	// prepare the request struct
 	req := GolRequest{
