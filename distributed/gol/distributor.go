@@ -84,65 +84,68 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 		}
 	}()
 
-	// // keyPresses handling goroutine: handles pause/save/quit using latest snapshot
-	// go func() {
-	// 	paused := false
-	// 	var latestSnapshot turnData
-	// 	for {
-	// 		select {
-	// 		case data := <-snapshotKey:
-	// 			// update latest snapshot
-	// 			latestSnapshot = data
-	// 		case key := <-keyPresses:
-	// 			// allow toggle pause anytime
-	// 			if key == 'p' {
-	// 				paused = !paused
-	// 				if paused {
-	// 					c.events <- StateChange{latestSnapshot.CompletedTurns, Paused}
-	// 					pauseReq <- true
+	// keyPresses handling goroutine: handles pause/save/quit using latest snapshot
+	go func() {
+		paused := false
 
-	// 				} else {
-	// 					c.events <- StateChange{latestSnapshot.CompletedTurns, Executing}
-	// 					pauseReq <- false
-	// 				}
-	// 				continue
-	// 			}
+		for {
+			select {
+			case key := <-keyPresses:
+				// allow toggle pause anytime
+				if key == 'p' {
+					paused = !paused
+					var PauseResponse PauseResponse
+					err := client.Call("GameOfLifeServer.Pause", PauseRequest{}, &PauseResponse)
+					if err != nil {
+						panic(err)
+					}
+					if paused {
+						c.events <- StateChange{PauseResponse.CompletedTurns, Paused}
 
-	// when paused, 's' saves and 'q' requests quit; 'q' can also be allowed when not paused if desired
-	// if key == 's' {
-	// 	// save state using latestSnapshot.world (deep copy already provided by main)
-	// 	pauseReq <- true
-	// 	c.ioCommand <- ioOutput
-	// 	c.ioFilename <- fmt.Sprintf("%vx%vx%v", p.ImageWidth, p.ImageHeight, latestSnapshot.CompletedTurns)
-	// 	for y := 0; y < p.ImageHeight; y++ {
-	// 		for x := 0; x < p.ImageWidth; x++ {
-	// 			val := latestSnapshot.world[y][x]
-	// 			c.ioOutput <- val
-	// 		}
-	// 	}
-	// 	c.ioCommand <- ioCheckIdle
-	// 	<-c.ioIdle
-	// 	c.events <- ImageOutputComplete{CompletedTurns: latestSnapshot.CompletedTurns, Filename: fmt.Sprintf("%vx%vx%v", p.ImageWidth, p.ImageHeight, latestSnapshot.CompletedTurns)}
+					} else {
+						c.events <- StateChange{PauseResponse.CompletedTurns, Executing}
+					}
+					continue
+				}
 
-	// 	pauseReq <- false
-	// 	continue
-	// }
+				// when paused, 's' saves and 'q' requests quit; 'q' can also be allowed when not paused if desired
+				if key == 's' {
+					// save state using latestSnapshot.world (deep copy already provided by main)
+					var SaveResponse SaveResponse
+					err := client.Call("GameOfLifeServer.Save", SaveRequest{}, &SaveResponse)
+					if err != nil {
+						panic(err)
+					}
+					c.ioCommand <- ioOutput
+					c.ioFilename <- fmt.Sprintf("%vx%vx%v", p.ImageWidth, p.ImageHeight, SaveResponse.CompletedTurns)
 
-	// 			if key == 'q' {
-	// 				// signal main loop to quit (non-blocking)
-	// 				pauseReq <- true
-	// 				select {
-	// 				case quitReq <- struct{}{}:
-	// 				default:
-	// 				}
-	// 				return
-	// 			}
-	// 		default:
-	// 			// small sleep to avoid busy loop when idle
-	// 			time.Sleep(10 * time.Millisecond)
-	// 		}
-	// 	}
-	// }()
+					for y := 0; y < p.ImageHeight; y++ {
+						for x := 0; x < p.ImageWidth; x++ {
+							val := SaveResponse.World[y][x]
+							c.ioOutput <- val
+						}
+					}
+					c.ioCommand <- ioCheckIdle
+					<-c.ioIdle
+					c.events <- ImageOutputComplete{CompletedTurns: SaveResponse.CompletedTurns, Filename: fmt.Sprintf("%vx%vx%v", p.ImageWidth, p.ImageHeight, SaveResponse.CompletedTurns)}
+
+					continue
+				}
+
+				if key == 'q' {
+					var QuitResponse SaveResponse
+					err := client.Call("GameOfLifeServer.Quit", QuitRequest{}, &QuitResponse)
+					if err != nil {
+						panic(err)
+					}
+				}
+
+			default:
+				// small sleep to avoid busy loop when idle
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
+	}()
 
 	// TODO: Execute all turns of the Game of Life.
 
@@ -164,7 +167,7 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 	// collect the returned result and continue like usual
 	world = res.World
 	aliveCells := res.Alive
-	latestTurn := p.Turns
+	latestTurn := res.CompletedTurns
 
 	// stop ticker goroutine
 	close(done)
@@ -199,25 +202,6 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 	// Close the channel to stop the SDL goroutine gracefully. Removing may cause deadlock.
 	close(c.events)
 }
-
-// // helper: deep-copy a world to avoid data races when sharing snapshots between goroutines
-// // this function was very important to avoid data races. u dont want any of the go routines to read or write directly to world as it is unstable
-// func copyWorld(wrld [][]uint8) [][]uint8 {
-// 	if wrld == nil {
-// 		return nil
-// 	}
-// 	h := len(wrld)
-// 	if h == 0 {
-// 		return [][]uint8{}
-// 	}
-// 	w := len(wrld[0])
-// 	dst := make([][]uint8, h)
-// 	for y := 0; y < h; y++ {
-// 		dst[y] = make([]uint8, w)
-// 		copy(dst[y], wrld[y])
-// 	}
-// 	return dst
-// }
 
 // // each worker takes their own chunk of rows and processes them
 // func worker(startRow int, endRow int, world [][]uint8, width int, height int, result chan<- workerResult) {
