@@ -232,13 +232,6 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 		}
 	}
 
-	// if quit was requested inside the loop, drain and proceed to shutdown
-	select {
-	case <-quitReq:
-		// proceed to finalization below
-	default:
-	}
-
 	// stop ticker goroutine
 	close(done)
 
