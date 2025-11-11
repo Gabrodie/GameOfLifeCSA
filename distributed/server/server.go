@@ -1,8 +1,10 @@
 package main
 
 import (
+	"fmt"
 	"net"
 	"net/rpc"
+	"os"
 	"sync"
 
 	"uk.ac.bris.cs/gameoflife/gol"
@@ -17,6 +19,7 @@ type GameOfLifeServer struct {
 	paused         bool
 	pauseReq       chan bool // shared pause/unpause channel
 	quitReq        chan struct{}
+	killReq        chan struct{}
 	World          [][]uint8
 }
 
@@ -30,41 +33,40 @@ func (s *GameOfLifeServer) AdvanceWorld(request gol.GolRequest, response *gol.Go
 
 	// create pause channel only once
 	if s.pauseReq == nil {
-		s.pauseReq = make(chan bool)
-	} else if s.quitReq == nil {
+		s.pauseReq = make(chan bool, 1)
+	}
+	if s.quitReq == nil {
 		s.quitReq = make(chan struct{})
+	}
+	if s.killReq == nil {
+		s.killReq = make(chan struct{})
 	}
 
 	for i := 0; i < request.Turns; i++ {
-		s.lock.Lock()
-		isPaused := s.paused
-		s.lock.Unlock()
 		var quit bool
 
-		if isPaused {
-			for {
-				pause := <-s.pauseReq // blocks until signal received
-				s.lock.Lock()
-				s.paused = pause
-				s.lock.Unlock()
-				if !pause {
-					break // resume
+		select {
+		case pause := <-s.pauseReq:
+			for pause {
+				// wait here until unpaused
+				select {
+				case pause = <-s.pauseReq:
+				case <-s.quitReq:
+					quit = true
+					pause = false
 				}
 			}
-		}
-		select {
-		case <-s.quitReq:
-			quit = true
 		default:
 		}
-		if quit == true {
+		if quit {
 			break
 		}
 
 		s.lock.Lock()
-		var flipped []util.Cell
-		s.World, flipped = gol.CalculateNextState(world)
-		s.currentAlive = gol.CalculateAliveCells(world)
+		newWorld, flipped := gol.CalculateNextState(world)
+		world = newWorld
+		s.World = newWorld
+		s.currentAlive = gol.CalculateAliveCells(newWorld)
 		s.completedTurns = i + 1
 		s.flipped = flipped
 		s.lock.Unlock()
@@ -76,6 +78,11 @@ func (s *GameOfLifeServer) AdvanceWorld(request gol.GolRequest, response *gol.Go
 	response.Alive = gol.CalculateAliveCells(world)
 	response.CompletedTurns = s.completedTurns
 	s.lock.Unlock()
+	select {
+	case <-s.killReq:
+		os.Exit(0)
+	default:
+	}
 
 	return nil
 }
@@ -110,38 +117,45 @@ func (s *GameOfLifeServer) Pause(request gol.PauseRequest, response *gol.PauseRe
 }
 
 func (s *GameOfLifeServer) Save(request gol.SaveRequest, response *gol.SaveResponse) error {
+	wasPaused := s.paused
+
+	//If not paused, request a pause first
+
+	s.pauseReq <- true // safely pause AdvanceWorld loop
+
+	//Perform the save (guaranteed safe snapshot)
 	s.lock.Lock()
-	if !s.paused {
-		s.paused = true
-		if s.pauseReq != nil {
-			// Unlock before sending so we don’t deadlock AdvanceWorld
-			s.lock.Unlock()
-			s.pauseReq <- true
-			s.lock.Lock()
-		}
-	}
-	// Now we are guaranteed paused, so World is stable
 	response.CompletedTurns = s.completedTurns
 	response.World = make([][]uint8, len(s.World))
 	for i := range s.World {
 		response.World[i] = append([]uint8(nil), s.World[i]...) // deep copy
 	}
+	fmt.Println("✅ World saved at turn", s.completedTurns)
 	s.lock.Unlock()
+
+	// 🔹 Step 3: If we paused just for saving, resume again
+	if !wasPaused {
+		fmt.Println("Resuming after save...")
+		s.pauseReq <- false
+
+		s.lock.Lock()
+		s.paused = false
+		s.lock.Unlock()
+	}
 
 	return nil
 }
 
 func (s *GameOfLifeServer) Quit(request gol.QuitRequest, response *gol.QuitResponse) error {
-	s.lock.Lock()
-	if !s.paused {
-		s.paused = true
-		if s.pauseReq != nil {
-			// Unlock before sending so we don’t deadlock AdvanceWorld
-			s.lock.Unlock()
-			s.pauseReq <- true
-			s.lock.Lock()
-		}
-	}
+	s.pauseReq <- true
+	s.quitReq <- struct{}{}
+	return nil
+}
+
+func (s *GameOfLifeServer) Kill(request gol.KillRequest, response *gol.KillResponse) error {
+	s.pauseReq <- true
+	s.quitReq <- struct{}{}
+	s.killReq <- struct{}{}
 	return nil
 }
 
@@ -167,7 +181,6 @@ func (s *GameOfLifeServer) Quit(request gol.QuitRequest, response *gol.QuitRespo
 func main() {
 	rpc.Register(new(GameOfLifeServer))
 
-	// 🔹 Reverted: no error check on Listen
 	listener, _ := net.Listen("tcp", ":6000")
 	defer listener.Close()
 

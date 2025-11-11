@@ -45,3 +45,7 @@ type SaveResponse struct {
 type QuitRequest struct{}
 
 type QuitResponse struct{}
+
+type KillRequest struct{}
+
+type KillResponse struct{}

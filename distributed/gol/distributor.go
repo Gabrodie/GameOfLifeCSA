@@ -3,6 +3,7 @@ package gol
 import (
 	"fmt"
 	"net/rpc"
+	"os"
 	"time"
 
 	"uk.ac.bris.cs/gameoflife/util"
@@ -55,6 +56,7 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 	// snapshotKey := make(chan turnData, 1) // keypress goroutine reads latest snapshot for save/quit
 	// quitReq := make(chan struct{}, 1)     // keypress signals quit to main loop
 	done := make(chan struct{}) // closed by main once simulation finishes
+	KillChan := make(chan struct{})
 	// pauseReq := make(chan bool, 1)        // unimplemented: can be used to signal pause/resume
 
 	// Ticker goroutine sends AliveCellsCount events every 2 seconds
@@ -133,11 +135,21 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 				}
 
 				if key == 'q' {
-					var QuitResponse SaveResponse
+					var QuitResponse QuitResponse
 					err := client.Call("GameOfLifeServer.Quit", QuitRequest{}, &QuitResponse)
 					if err != nil {
 						panic(err)
 					}
+				}
+
+				if key == 'k' {
+					var KillResponse KillResponse
+					err := client.Call("GameOfLifeServer.Kill", KillRequest{}, &KillResponse)
+					if err != nil {
+						panic(err)
+					}
+					KillChan <- struct{}{}
+
 				}
 
 			default:
@@ -201,6 +213,13 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 
 	// Close the channel to stop the SDL goroutine gracefully. Removing may cause deadlock.
 	close(c.events)
+
+	select {
+	case <-KillChan:
+		client.Close()
+		os.Exit(0)
+	default:
+	}
 }
 
 // // each worker takes their own chunk of rows and processes them
