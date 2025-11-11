@@ -6,6 +6,7 @@ import (
 	"net/rpc"
 	"os"
 	"sync"
+	"time"
 
 	"uk.ac.bris.cs/gameoflife/gol"
 	"uk.ac.bris.cs/gameoflife/util"
@@ -26,6 +27,13 @@ type GameOfLifeServer struct {
 // AdvanceWorld is RPC method that clients call to advance the world
 func (s *GameOfLifeServer) AdvanceWorld(request gol.GolRequest, response *gol.GolResponse) error {
 	world := request.World
+	// RESET server state for this simulation batch
+	s.lock.Lock()
+	s.completedTurns = 0
+	s.currentAlive = nil
+	s.flipped = nil
+	s.World = world
+	s.lock.Unlock()
 
 	s.lock.Lock()
 	s.paused = false
@@ -78,11 +86,6 @@ func (s *GameOfLifeServer) AdvanceWorld(request gol.GolRequest, response *gol.Go
 	response.Alive = gol.CalculateAliveCells(world)
 	response.CompletedTurns = s.completedTurns
 	s.lock.Unlock()
-	select {
-	case <-s.killReq:
-		os.Exit(0)
-	default:
-	}
 
 	return nil
 }
@@ -155,7 +158,13 @@ func (s *GameOfLifeServer) Quit(request gol.QuitRequest, response *gol.QuitRespo
 func (s *GameOfLifeServer) Kill(request gol.KillRequest, response *gol.KillResponse) error {
 	s.pauseReq <- true
 	s.quitReq <- struct{}{}
-	s.killReq <- struct{}{}
+	//delay kill to ensure nil is returned
+	go func() {
+		// allow RPC to flush and client to receive response
+		// small delay to ensure return nil is done
+		time.Sleep(50 * time.Millisecond)
+		os.Exit(0)
+	}()
 	return nil
 }
 

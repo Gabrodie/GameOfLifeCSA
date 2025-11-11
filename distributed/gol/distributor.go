@@ -48,6 +48,7 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 	initialAlive := CalculateAliveCells(world)
 	if len(initialAlive) > 0 {
 		c.events <- CellsFlipped{CompletedTurns: 0, Cells: initialAlive}
+
 	}
 	c.events <- StateChange{0, Executing}
 
