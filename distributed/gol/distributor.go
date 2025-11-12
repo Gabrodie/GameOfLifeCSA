@@ -2,8 +2,9 @@ package gol
 
 import (
 	"fmt"
-	"time"
 	"net/rpc"
+	"os"
+	"time"
 
 	"uk.ac.bris.cs/gameoflife/util"
 )
@@ -17,20 +18,12 @@ type distributorChannels struct {
 	ioInput    <-chan uint8
 }
 
-// new struct so workers can send both their section, flipped and which row they started at
-type workerResult struct {
-	section [][]uint8
-	flipped []util.Cell
-	startY  int
-}
-
-// new struct to hold all info after completed turns
-type turnData struct {
-	CompletedTurns int
-	CellsCount     int
-	world          [][]uint8
-	Alive          []util.Cell
-}
+// // new struct so workers can send both their section, flipped and which row they started at
+// type workerResult struct {
+// 	section [][]uint8
+// 	flipped []util.Cell
+// 	startY  int
+// }
 
 // distributor divides the work between workers and interacts with other goroutines.
 func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
@@ -38,7 +31,7 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 	// connect to the AWS server via rpc (localhost for now to test)
 	client, err := rpc.Dial("tcp", "localhost:6000")
 	if err != nil {
-    	panic(err)
+		panic(err)
 	}
 	defer client.Close()
 
@@ -55,15 +48,17 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 	initialAlive := CalculateAliveCells(world)
 	if len(initialAlive) > 0 {
 		c.events <- CellsFlipped{CompletedTurns: 0, Cells: initialAlive}
+
 	}
 	c.events <- StateChange{0, Executing}
 
 	// channels used for sharing the latest snapshot with ticker and keypress goroutine
 	// snapshotTicker := make(chan turnData, 1) // ticker reads latest snapshot
-	snapshotKey := make(chan turnData, 1)    // keypress goroutine reads latest snapshot for save/quit
-	quitReq := make(chan struct{}, 1)        // keypress signals quit to main loop
-	done := make(chan struct{})              // closed by main once simulation finishes
-	pauseReq := make(chan bool, 1)           // unimplemented: can be used to signal pause/resume
+	// snapshotKey := make(chan turnData, 1) // keypress goroutine reads latest snapshot for save/quit
+	// quitReq := make(chan struct{}, 1)     // keypress signals quit to main loop
+	done := make(chan struct{}) // closed by main once simulation finishes
+	KillChan := make(chan struct{})
+	// pauseReq := make(chan bool, 1)        // unimplemented: can be used to signal pause/resume
 
 	// Ticker goroutine sends AliveCellsCount events every 2 seconds
 	go func() {
@@ -82,10 +77,12 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 			case <-ticker.C:
 				var status StatusResponse
 				err := client.Call("GameOfLifeServer.GetStatus", StatusRequest{}, &status)
-				if err == nil{
+				if err == nil {
 					c.events <- AliveCellsCount{CompletedTurns: status.CompletedTurns, CellsCount: status.AliveCount}
+					c.events <- CellsFlipped{CompletedTurns: status.CompletedTurns, Cells: status.FlippedCells}
+					c.events <- TurnComplete{CompletedTurns: status.CompletedTurns}
 				}
-				
+
 			}
 		}
 	}()
@@ -93,23 +90,23 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 	// keyPresses handling goroutine: handles pause/save/quit using latest snapshot
 	go func() {
 		paused := false
-		var latestSnapshot turnData
+
 		for {
 			select {
-			case data := <-snapshotKey:
-				// update latest snapshot
-				latestSnapshot = data
 			case key := <-keyPresses:
 				// allow toggle pause anytime
 				if key == 'p' {
 					paused = !paused
+					var PauseResponse PauseResponse
+					err := client.Call("GameOfLifeServer.Pause", PauseRequest{}, &PauseResponse)
+					if err != nil {
+						panic(err)
+					}
 					if paused {
-						c.events <- StateChange{latestSnapshot.CompletedTurns, Paused}
-						pauseReq <- true
+						c.events <- StateChange{PauseResponse.CompletedTurns, Paused}
 
 					} else {
-						c.events <- StateChange{latestSnapshot.CompletedTurns, Executing}
-						pauseReq <- false
+						c.events <- StateChange{PauseResponse.CompletedTurns, Executing}
 					}
 					continue
 				}
@@ -117,32 +114,45 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 				// when paused, 's' saves and 'q' requests quit; 'q' can also be allowed when not paused if desired
 				if key == 's' {
 					// save state using latestSnapshot.world (deep copy already provided by main)
-					pauseReq <- true
+					var SaveResponse SaveResponse
+					err := client.Call("GameOfLifeServer.Save", SaveRequest{}, &SaveResponse)
+					if err != nil {
+						panic(err)
+					}
 					c.ioCommand <- ioOutput
-					c.ioFilename <- fmt.Sprintf("%vx%vx%v", p.ImageWidth, p.ImageHeight, latestSnapshot.CompletedTurns)
+					c.ioFilename <- fmt.Sprintf("%vx%vx%v", p.ImageWidth, p.ImageHeight, SaveResponse.CompletedTurns)
+
 					for y := 0; y < p.ImageHeight; y++ {
 						for x := 0; x < p.ImageWidth; x++ {
-							val := latestSnapshot.world[y][x]
+							val := SaveResponse.World[y][x]
 							c.ioOutput <- val
 						}
 					}
 					c.ioCommand <- ioCheckIdle
 					<-c.ioIdle
-					c.events <- ImageOutputComplete{CompletedTurns: latestSnapshot.CompletedTurns, Filename: fmt.Sprintf("%vx%vx%v", p.ImageWidth, p.ImageHeight, latestSnapshot.CompletedTurns)}
+					c.events <- ImageOutputComplete{CompletedTurns: SaveResponse.CompletedTurns, Filename: fmt.Sprintf("%vx%vx%v", p.ImageWidth, p.ImageHeight, SaveResponse.CompletedTurns)}
 
-					pauseReq <- false
 					continue
 				}
 
 				if key == 'q' {
-					// signal main loop to quit (non-blocking)
-					pauseReq <- true
-					select {
-					case quitReq <- struct{}{}:
-					default:
+					var QuitResponse QuitResponse
+					err := client.Call("GameOfLifeServer.Quit", QuitRequest{}, &QuitResponse)
+					if err != nil {
+						panic(err)
 					}
-					return
 				}
+
+				if key == 'k' {
+					var KillResponse KillResponse
+					err := client.Call("GameOfLifeServer.Kill", KillRequest{}, &KillResponse)
+					if err != nil {
+						panic(err)
+					}
+					KillChan <- struct{}{}
+
+				}
+
 			default:
 				// small sleep to avoid busy loop when idle
 				time.Sleep(10 * time.Millisecond)
@@ -151,35 +161,26 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 	}()
 
 	// TODO: Execute all turns of the Game of Life.
-	latestTurn := 0
 
 	// prepare the request struct
 	req := GolRequest{
-    	World:       world,
-    	ImageWidth:  p.ImageWidth,
-    	ImageHeight: p.ImageHeight,
-    	Turns:       p.Turns,
+		World:       world,
+		ImageWidth:  p.ImageWidth,
+		ImageHeight: p.ImageHeight,
+		Turns:       p.Turns,
 	}
 	var res GolResponse
 
 	// call the remote function (defined in server.go)
 	err = client.Call("GameOfLifeServer.AdvanceWorld", req, &res)
 	if err != nil {
-    	panic(err)
+		panic(err)
 	}
 
 	// collect the returned result and continue like usual
 	world = res.World
 	aliveCells := res.Alive
-	latestTurn = p.Turns
-
-
-	// if quit was requested inside the loop, drain and proceed to shutdown
-	select {
-	case <-quitReq:
-		// proceed to finalization below
-	default:
-	}
+	latestTurn := res.CompletedTurns
 
 	// stop ticker goroutine
 	close(done)
@@ -213,71 +214,59 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 
 	// Close the channel to stop the SDL goroutine gracefully. Removing may cause deadlock.
 	close(c.events)
-}
 
-// helper: deep-copy a world to avoid data races when sharing snapshots between goroutines
-// this function was very important to avoid data races. u dont want any of the go routines to read or write directly to world as it is unstable
-func copyWorld(wrld [][]uint8) [][]uint8 {
-	if wrld == nil {
-		return nil
-	}
-	h := len(wrld)
-	if h == 0 {
-		return [][]uint8{}
-	}
-	w := len(wrld[0])
-	dst := make([][]uint8, h)
-	for y := 0; y < h; y++ {
-		dst[y] = make([]uint8, w)
-		copy(dst[y], wrld[y])
-	}
-	return dst
-}
-
-// each worker takes their own chunk of rows and processes them
-func worker(startRow int, endRow int, world [][]uint8, width int, height int, result chan<- workerResult) {
-	newSection := make([][]uint8, endRow-startRow)
-	var flipped []util.Cell
-
-	// same logic in CalculateNextState()
-	for y := startRow; y < endRow; y++ {
-		newSection[y-startRow] = make([]uint8, width)
-		for x := 0; x < width; x++ {
-			aliveNeighbors := CountAliveNeighbors(world, x, y, width, height)
-			current := world[y][x]
-			next := current
-
-			if current != 0 {
-				// Cell is currently active
-				if aliveNeighbors < 2 {
-					next = 0
-				} else if aliveNeighbors == 2 || aliveNeighbors == 3 {
-					next = 255
-				} else {
-					next = 0
-				}
-			} else {
-				// dead cell
-				if aliveNeighbors == 3 {
-					next = 255
-				} else {
-					next = 0
-				}
-			}
-
-			if next != current {
-				flipped = append(flipped, util.Cell{X: x, Y: y})
-			}
-			newSection[y-startRow][x] = next
-		}
-	}
-	// send results to the channel
-	result <- workerResult{
-		section: newSection,
-		flipped: flipped,
-		startY:  startRow,
+	select {
+	case <-KillChan:
+		client.Close()
+		os.Exit(0)
+	default:
 	}
 }
+
+// // each worker takes their own chunk of rows and processes them
+// func worker(startRow int, endRow int, world [][]uint8, width int, height int, result chan<- workerResult) {
+// 	newSection := make([][]uint8, endRow-startRow)
+// 	var flipped []util.Cell
+
+// 	// same logic in CalculateNextState()
+// 	for y := startRow; y < endRow; y++ {
+// 		newSection[y-startRow] = make([]uint8, width)
+// 		for x := 0; x < width; x++ {
+// 			aliveNeighbors := CountAliveNeighbors(world, x, y, width, height)
+// 			current := world[y][x]
+// 			next := current
+
+// 			if current != 0 {
+// 				// Cell is currently active
+// 				if aliveNeighbors < 2 {
+// 					next = 0
+// 				} else if aliveNeighbors == 2 || aliveNeighbors == 3 {
+// 					next = 255
+// 				} else {
+// 					next = 0
+// 				}
+// 			} else {
+// 				// dead cell
+// 				if aliveNeighbors == 3 {
+// 					next = 255
+// 				} else {
+// 					next = 0
+// 				}
+// 			}
+
+// 			if next != current {
+// 				flipped = append(flipped, util.Cell{X: x, Y: y})
+// 			}
+// 			newSection[y-startRow][x] = next
+// 		}
+// 	}
+// 	// send results to the channel
+// 	result <- workerResult{
+// 		section: newSection,
+// 		flipped: flipped,
+// 		startY:  startRow,
+// 	}
+// }
 
 func CalculateNextState(world [][]uint8) ([][]uint8, []util.Cell) {
 	height := len(world)
@@ -319,7 +308,7 @@ func CalculateNextState(world [][]uint8) ([][]uint8, []util.Cell) {
 	return newWorld, flipped
 }
 
-//capitalised so they can be exported (both functions below were lowercase previously)
+// capitalised so they can be exported (both functions below were lowercase previously)
 func CountAliveNeighbors(world [][]uint8, x, y, width, height int) int {
 	sum := 0
 	for dy := -1; dy <= 1; dy++ {
