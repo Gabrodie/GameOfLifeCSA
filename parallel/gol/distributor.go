@@ -14,6 +14,7 @@ type distributorChannels struct {
 	ioFilename chan<- string
 	ioOutput   chan<- uint8
 	ioInput    <-chan uint8
+	keyPresses <-chan rune
 }
 
 // new struct so workers can send both their section, flipped and which row they started at
@@ -32,7 +33,7 @@ type turnData struct {
 }
 
 // distributor divides the work between workers and interacts with other goroutines.
-func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
+func distributor(p Params, c distributorChannels) {
 
 	// TODO: Create a 2D slice to store the world.
 	c.ioCommand <- ioInput
@@ -99,7 +100,7 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 			case data := <-snapshotKey:
 				// update latest snapshot
 				latestSnapshot = data
-			case key := <-keyPresses:
+			case key := <-c.keyPresses:
 				// allow toggle pause anytime
 				if key == 'p' {
 					paused = !paused
