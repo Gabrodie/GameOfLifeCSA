@@ -31,3 +31,8 @@ func BenchmarkGol(b *testing.B) {
 		})
 	}
 }
+
+//steps for benchmarking
+
+//go test -run ^$ -bench . -benchtime 1x -count 5 | tee results.out
+//go run golang.org/x/perf/cmd/benchstat -format csv results.out | tee results.csv
