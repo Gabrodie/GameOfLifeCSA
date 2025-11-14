@@ -30,22 +30,155 @@ type turnData struct {
 	Alive          []util.Cell
 }
 
-// helper: deep-copy a world to avoid data races when sharing snapshots between goroutines
-func copyWorld(wrld [][]uint8) [][]uint8 {
-	if wrld == nil {
-		return nil
+// counts alive cells surounding cells of every cell
+func countAliveNeighbors(world [][]uint8, x, y, width, height int) int {
+	sum := 0
+	//3 rows
+	for dy := -1; dy <= 1; dy++ {
+		//3 columns
+		for dx := -1; dx <= 1; dx++ {
+			//ignoring middle cell
+			if dy == 0 && dx == 0 {
+				continue
+			}
+			//uses modulo for wrap around function(eg. when y =0, y + dy + height = height -1 ... ny = height -1 % height = height -1)
+			ny := (y + dy + height) % height
+			nx := (x + dx + width) % width
+			if world[ny][nx] != 0 {
+				sum++
+			}
+		}
 	}
-	h := len(wrld)
-	if h == 0 {
-		return [][]uint8{}
+	return sum
+}
+
+func countAliveNeighborsFast(world [][]uint8, x, y, width, height int) int {
+	sum := 0
+	//no more modulo
+	// Row above
+	ny := y - 1
+	//wrap around
+	if ny < 0 {
+		ny = height - 1
 	}
-	w := len(wrld[0])
-	dst := make([][]uint8, h)
-	for y := 0; y < h; y++ {
-		dst[y] = make([]uint8, w)
-		copy(dst[y], wrld[y])
+	// Left
+	nx := x - 1
+	//wrap around
+	if nx < 0 {
+		nx = width - 1
 	}
-	return dst
+	if world[ny][nx] != 0 {
+		sum++
+	}
+
+	// Middle
+	nx = x
+	if world[ny][nx] != 0 {
+		sum++
+	}
+
+	// Right
+	nx = x + 1
+	if nx >= width {
+		nx = 0
+	}
+	if world[ny][nx] != 0 {
+		sum++
+	}
+
+	// Same row
+	ny = y
+
+	//left
+	nx = x - 1
+	if nx < 0 {
+		nx = width - 1
+	}
+	if world[ny][nx] != 0 {
+		sum++
+	}
+
+	//right
+	nx = x + 1
+	if nx >= width {
+		nx = 0
+	}
+	if world[ny][nx] != 0 {
+		sum++
+	}
+
+	// Row below
+	ny = y + 1
+	if ny >= height {
+		ny = 0
+	}
+
+	//left
+	nx = x - 1
+	if nx < 0 {
+		nx = width - 1
+	}
+	if world[ny][nx] != 0 {
+		sum++
+	}
+
+	//middle
+	nx = x
+	if world[ny][nx] != 0 {
+		sum++
+	}
+
+	//right
+	nx = x + 1
+	if nx >= width {
+		nx = 0
+	}
+	if world[ny][nx] != 0 {
+		sum++
+	}
+
+	return sum
+}
+
+// CalculateNextState was implemnted for serial implementation (intentionally unchanged).
+func CalculateNextState(world [][]uint8) ([][]uint8, []util.Cell) {
+	height := len(world)
+	width := len(world[0])
+	newWorld := make([][]uint8, height)
+	var flipped []util.Cell
+
+	for y := 0; y < height; y++ {
+		newWorld[y] = make([]uint8, width)
+		for x := 0; x < width; x++ {
+			aliveNeighbors := countAliveNeighborsFast(world, x, y, width, height)
+			current := world[y][x]
+			next := current
+			if current != 0 {
+				// Cell is currently alive
+				if aliveNeighbors < 2 {
+					next = 0
+
+				} else if aliveNeighbors == 2 || aliveNeighbors == 3 {
+					next = 255
+				} else {
+					next = 0
+				}
+			} else {
+				// dead cell
+				if aliveNeighbors == 3 {
+					next = 255
+				} else {
+					next = 0
+				}
+			}
+			if next != current {
+				flipped = append(flipped, util.Cell{X: x, Y: y})
+			}
+			newWorld[y][x] = next
+		}
+
+	}
+	return newWorld, flipped
 }
 
 // each worker takes their own chunk of rows and processes them
@@ -56,7 +189,7 @@ func worker(startRow int, endRow int, world [][]uint8, width int, height int, re
 	for y := startRow; y < endRow; y++ {
 		newSection[y-startRow] = make([]uint8, width)
 		for x := 0; x < width; x++ {
-			aliveNeighbors := countAliveNeighbors(world, x, y, width, height)
+			aliveNeighbors := countAliveNeighborsFast(world, x, y, width, height)
 			current := world[y][x]
 			next := current
 
@@ -92,65 +225,6 @@ func worker(startRow int, endRow int, world [][]uint8, width int, height int, re
 	}
 }
 
-// CalculateNextState was implemnted for serial implementation (intentionally unchanged).
-func CalculateNextState(world [][]uint8) ([][]uint8, []util.Cell) {
-	height := len(world)
-	width := len(world[0])
-	newWorld := make([][]uint8, height)
-	var flipped []util.Cell
-
-	for y := 0; y < height; y++ {
-		newWorld[y] = make([]uint8, width)
-		for x := 0; x < width; x++ {
-			aliveNeighbors := countAliveNeighbors(world, x, y, width, height)
-			current := world[y][x]
-			next := current
-			if current != 0 {
-				// Cell is currently alive
-				if aliveNeighbors < 2 {
-					next = 0
-
-				} else if aliveNeighbors == 2 || aliveNeighbors == 3 {
-					next = 255
-				} else {
-					next = 0
-				}
-			} else {
-				// dead cell
-				if aliveNeighbors == 3 {
-					next = 255
-				} else {
-					next = 0
-				}
-			}
-			if next != current {
-				flipped = append(flipped, util.Cell{X: x, Y: y})
-			}
-			newWorld[y][x] = next
-		}
-
-	}
-	return newWorld, flipped
-}
-
-// counts alive cells surounding cells of every cell
-func countAliveNeighbors(world [][]uint8, x, y, width, height int) int {
-	sum := 0
-	for dy := -1; dy <= 1; dy++ {
-		for dx := -1; dx <= 1; dx++ {
-			if dy == 0 && dx == 0 {
-				continue
-			}
-			ny := (y + dy + height) % height
-			nx := (x + dx + width) % width
-			if world[ny][nx] != 0 {
-				sum++
-			}
-		}
-	}
-	return sum
-}
-
 // calculates Alive Cells in a each state of the world
 func calculateAliveCells(world [][]uint8) []util.Cell {
 	var alive []util.Cell
@@ -162,6 +236,24 @@ func calculateAliveCells(world [][]uint8) []util.Cell {
 		}
 	}
 	return alive
+}
+
+// deep-copy a world to avoid data races when sharing snapshots between goroutines
+func copyWorld(wrld [][]uint8) [][]uint8 {
+	if wrld == nil {
+		return nil
+	}
+	h := len(wrld)
+	if h == 0 {
+		return [][]uint8{}
+	}
+	w := len(wrld[0])
+	dst := make([][]uint8, h)
+	for y := 0; y < h; y++ {
+		dst[y] = make([]uint8, w)
+		copy(dst[y], wrld[y])
+	}
+	return dst
 }
 
 // writeImage writes the world to the io goroutine and waits for it to become idle.
@@ -205,11 +297,16 @@ func distributor(p Params, c distributorChannels) {
 	c.events <- StateChange{0, Executing}
 
 	// channels used to share latest snapshot with ticker and keypress goroutine
-	snapshotTicker := make(chan turnData, 1) // ticker reads latest snapshot
-	snapshotKey := make(chan turnData, 1)    // keypress uses latest snapshot for save/quit
-	quitReq := make(chan struct{}, 1)        // keypress signals quit to main loop
-	done := make(chan struct{})              // closed by main once simulation finishes
-	pauseReq := make(chan bool, 1)           // used to signal pause/resume to main loop
+	// ticker reads latest snapshot
+	snapshotTicker := make(chan turnData, 1)
+	// keypress uses latest snapshot for save/quit
+	snapshotKey := make(chan turnData, 1)
+	// keypress signals quit to main loop
+	quitReq := make(chan struct{}, 1)
+	// closed by main once simulation finishes
+	done := make(chan struct{})
+	// used to signal pause/resume to main loop
+	pauseReq := make(chan bool, 1)
 
 	//ticker go routine that sends alivecellcount every 2 seconds
 	go func() {
