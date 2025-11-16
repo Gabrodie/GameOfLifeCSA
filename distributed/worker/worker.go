@@ -3,7 +3,6 @@ package main
 import (
 	"net"
 	"net/rpc"
-	"os"
 
 	"uk.ac.bris.cs/gameoflife/gol"
 	"uk.ac.bris.cs/gameoflife/util"
@@ -77,15 +76,14 @@ func (w *Worker) Step(req gol.WorkerStepRequest, res *gol.WorkerStepResponse) er
 
 func main() {
 	port := ":7000"
-	if len(os.Args) > 1 {
-		port = os.Args[1]
-	}
 
 	rpc.Register(new(Worker))
+
 	l, err := net.Listen("tcp", port)
 	if err != nil {
 		panic(err)
 	}
 	defer l.Close()
+
 	rpc.Accept(l)
 }
