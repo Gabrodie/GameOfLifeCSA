@@ -62,30 +62,46 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 
 	// Ticker goroutine sends AliveCellsCount events every 2 seconds
 	go func() {
-		ticker := time.NewTicker(2 * time.Second)
-		defer ticker.Stop()
+    	ticker := time.NewTicker(2 * time.Second)
+    	defer ticker.Stop()
 
-		// store latest turn and alive count known by ticker
-		// currentTurn := 0
-		// currentAlive := len(initialAlive) // initial world count
+    	lastTurn := -1
 
-		for {
-			select {
-			case <-done:
-				return
+    	for {
+        	select {
+        	case <-done:
+            	return
 
-			case <-ticker.C:
-				var status StatusResponse
-				err := client.Call("GameOfLifeServer.GetStatus", StatusRequest{}, &status)
-				if err == nil {
-					c.events <- AliveCellsCount{CompletedTurns: status.CompletedTurns, CellsCount: status.AliveCount}
-					c.events <- CellsFlipped{CompletedTurns: status.CompletedTurns, Cells: status.FlippedCells}
-					c.events <- TurnComplete{CompletedTurns: status.CompletedTurns}
-				}
+        	case <-ticker.C:
+            	var status StatusResponse
+            	err := client.Call("GameOfLifeServer.GetStatus", StatusRequest{}, &status)
+            	if err != nil {
+                	continue
+            	}
 
-			}
-		}
+            	// always okay to send alive count (GUI uses this for stats)
+            	c.events <- AliveCellsCount{
+                CompletedTurns: status.CompletedTurns,
+                CellsCount:     status.AliveCount,
+            	}
+
+            	// only send flip + TurnComplete if we've actually progressed
+            	if status.CompletedTurns != lastTurn {
+                	if len(status.FlippedCells) > 0 {
+                    	c.events <- CellsFlipped{
+                        	CompletedTurns: status.CompletedTurns,
+                        	Cells:          status.FlippedCells,
+                    	}
+                	}
+                	c.events <- TurnComplete{
+                    	CompletedTurns: status.CompletedTurns,
+                	}
+                	lastTurn = status.CompletedTurns
+            	}
+        	}
+    	}
 	}()
+
 
 	// keyPresses handling goroutine: handles pause/save/quit using latest snapshot
 	go func() {
