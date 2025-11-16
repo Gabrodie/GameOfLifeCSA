@@ -49,3 +49,22 @@ type QuitResponse struct{}
 type KillRequest struct{}
 
 type KillResponse struct{}
+
+type WorkerStepRequest struct {
+    // Chunk includes 1 halo row above and 1 below
+    Chunk [][]uint8
+
+    // Global starting row index of the *inner* chunk (not including the top halo)
+    StartY int
+
+    Width  int
+    Height int // total height of Chunk including halos
+}
+
+type WorkerStepResponse struct {
+    // NewInner will be len = Height-2 (no halos), rows that correspond to StartY..StartY+innerHeight-1
+    NewInner [][]uint8
+
+    // Flipped cells with global coordinates (Broker doesn’t need to shift them)
+    Flipped []util.Cell
+}
