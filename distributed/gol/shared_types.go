@@ -68,3 +68,9 @@ type WorkerStepResponse struct {
     // Flipped cells with global coordinates (Broker doesn’t need to shift them)
     Flipped []util.Cell
 }
+
+type WorkerConfigRequest struct {
+    NumWorkers int
+}
+
+type WorkerConfigResponse struct{}
