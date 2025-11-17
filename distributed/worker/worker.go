@@ -3,87 +3,117 @@ package main
 import (
 	"net"
 	"net/rpc"
-
+	"sync"
 	"uk.ac.bris.cs/gameoflife/gol"
 	"uk.ac.bris.cs/gameoflife/util"
+	"runtime"
 )
 
 type Worker struct{}
 
 func (w *Worker) Step(req gol.WorkerStepRequest, res *gol.WorkerStepResponse) error {
-	chunk := req.Chunk
-	h := len(chunk)
-	if h < 3 {
-		// must have at least 1 inner row + 2 halo rows
-		res.NewInner = [][]uint8{}
-		res.Flipped = nil
-		return nil
+    chunk := req.Chunk
+    h := len(chunk)
+    if h < 3 {
+        res.NewInner = [][]uint8{}
+        res.Flipped = nil
+        return nil
+    }
+
+    width := req.Width
+	
+    innerHeight := h - 2 // h-1 as worker processes rows [startY:endY)
+	// there is a halo row on the bottom so take off another, hence h-2
+
+    // create output
+    newInner := make([][]uint8, innerHeight)
+    for i := range newInner {
+        newInner[i] = make([]uint8, width)
+    }
+
+    // parallelism inside worker node, number of threads passed in from broker
+    numThreads := req.NumThreads
+	if numThreads <= 0 {
+    	numThreads = runtime.NumCPU() // if number of threads isn't specified, use all available
 	}
 
-	width := req.Width
+    rowsPerThread := innerHeight / numThreads
+    extra := innerHeight % numThreads
 
-	newChunk := make([][]uint8, h)
-	for i := 0; i < h; i++ {
-		newChunk[i] = make([]uint8, width)
-	}
+    var wg sync.WaitGroup
+    start := 0
 
-	var flipped []util.Cell
+    for t := 0; t < numThreads; t++ {
+        rows := rowsPerThread
+		// distribute extra rows across threads
+        if t < extra {
+            rows++
+        }
+        end := start + rows
 
-	// y=1..h-2 are the "real" rows, 0 and h-1 are halos
-	for y := 1; y < h-1; y++ {
-		for x := 0; x < width; x++ {
-			alive := gol.CountAliveNeighbors(chunk, x, y, width, h)
-			current := chunk[y][x]
-			next := current
+        wg.Add(1)
+        go func(startY, endY int) {
+            defer wg.Done()
+            for y := startY; y < endY; y++ {
+                chunkY := y + 1
+                for x := 0; x < width; x++ {
+                    alive := gol.CountAliveNeighbors(chunk, x, chunkY, width, h)
+                    current := chunk[chunkY][x]
+                    next := current
 
-			if current != 0 {
-				if alive < 2 || alive > 3 {
-					next = 0
-				} else {
-					next = 255
-				}
-			} else {
-				if alive == 3 {
-					next = 255
-				} else {
-					next = 0
-				}
-			}
+                    if current != 0 {
+                        if alive < 2 || alive > 3 {
+                            next = 0
+                        } else {
+                            next = 255
+                        }
+                    } else {
+                        if alive == 3 {
+                            next = 255
+                        } else {
+                            next = 0
+                        }
+                    }
 
-			if next != current {
-				flipped = append(flipped, util.Cell{
-					X: x,
-					// map the y position here to the y position in the full world
-					// worker chunk indexes are offset by +1 because of the top halo so need to -1
-					Y: req.StartY + (y - 1),
-				})
-			}
+                    newInner[y][x] = next
+                }
+            }
+        }(start, end)
 
-			newChunk[y][x] = next
-		}
-	}
+        start = end
+    }
 
-	// remove halos before returning
-	innerHeight := h - 2
-	res.NewInner = make([][]uint8, innerHeight)
-	for y := 0; y < innerHeight; y++ {
-		// again offset because of halo rows
-		res.NewInner[y] = newChunk[y+1]
-	}
-	res.Flipped = flipped
-	return nil
+	// wait group waits until all goroutines finish
+    wg.Wait()
+
+    var flipped []util.Cell
+    for y := 0; y < innerHeight; y++ {
+        for x := 0; x < width; x++ {
+			// y+1 as chunk offset by halo row
+            if newInner[y][x] != chunk[y+1][x] {
+                flipped = append(flipped, util.Cell{
+                    X: x,
+                    Y: req.StartY + y,
+                })
+            }
+        }
+    }
+
+    res.NewInner = newInner
+    res.Flipped = flipped
+    return nil
 }
 
 func main() {
-	port := ":7000"
+    port := ":7000"
 
-	rpc.Register(new(Worker))
+    rpc.Register(new(Worker))
 
-	l, err := net.Listen("tcp", port)
-	if err != nil {
-		panic(err)
-	}
-	defer l.Close()
+    l, err := net.Listen("tcp", port)
+    if err != nil {
+        panic(err)
+    }
+    defer l.Close()
 
-	rpc.Accept(l)
+    rpc.Accept(l)
 }

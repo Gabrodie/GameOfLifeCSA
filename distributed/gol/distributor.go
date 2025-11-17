@@ -183,6 +183,7 @@ func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 		ImageWidth:  p.ImageWidth,
 		ImageHeight: p.ImageHeight,
 		Turns:       p.Turns,
+		// broker received NumThreads == 0, so use default num of threads for each worker
 	}
 	var res GolResponse
 
