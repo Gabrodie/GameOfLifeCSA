@@ -59,6 +59,8 @@ type WorkerStepRequest struct {
 
     Width  int
     Height int // total height of Chunk including halos
+
+	NumThreads int // number of threads for each worker to use	
 }
 
 type WorkerStepResponse struct {
@@ -74,3 +76,9 @@ type WorkerConfigRequest struct {
 }
 
 type WorkerConfigResponse struct{}
+
+type ThreadConfigRequest struct {
+    NumThreads int
+}
+
+type ThreadConfigResponse struct{}

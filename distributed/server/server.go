@@ -26,6 +26,7 @@ type GameOfLifeServer struct {
 	workers        []*rpc.Client
 	allWorkers     []*rpc.Client
 	activeWorkers  int
+	activeWorkerThreads int
 }
 
 // AdvanceWorld is RPC method that clients call to advance the world
@@ -197,7 +198,7 @@ func main() {
 
     srv := &GameOfLifeServer{}
 
-    // Dial ALL workers up front
+    // dial all workers up front
     for _, addr := range workerAddrs {
         cl, err := rpc.Dial("tcp", addr)
         if err != nil {
@@ -206,14 +207,14 @@ func main() {
         srv.allWorkers = append(srv.allWorkers, cl)
     }
 
-    // By default use all workers
+    // by default use all workers
     srv.activeWorkers = len(srv.allWorkers)
     srv.workers = srv.allWorkers[:srv.activeWorkers]
 
-    // Register RPC server (including ConfigureWorkers once you add it)
+    // register server
     rpc.Register(srv)
 
-    // Listen for client RPCs
+    // listen for client RPCs
     listener, err := net.Listen("tcp", ":7000")
     if err != nil {
         panic(err)
@@ -263,12 +264,13 @@ func (s *GameOfLifeServer) distributedStep(world [][]uint8) ([][]uint8, []util.C
         chunk = append(chunk, world[startRow:endRow]...)
         chunk = append(chunk, bottomHalo)
 
-        // Build request here
+        // build request
         req := gol.WorkerStepRequest{
             Chunk:  chunk,
             StartY: startRow,
             Width:  width,
             Height: len(chunk),
+			NumThreads: s.activeWorkerThreads,
         }
 
         // make a local copy of req so goroutines don't share it
@@ -328,5 +330,12 @@ func (s *GameOfLifeServer) ConfigureWorkers(req gol.WorkerConfigRequest, res *go
     s.workers = s.allWorkers[:req.NumWorkers]
     s.lock.Unlock()
 
+    return nil
+}
+
+func (s *GameOfLifeServer) ConfigureWorkerThreads(req gol.ThreadConfigRequest, res *gol.ThreadConfigResponse) error {
+    s.lock.Lock()
+    s.activeWorkerThreads = req.NumThreads
+    s.lock.Unlock()
     return nil
 }
