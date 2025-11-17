@@ -23,70 +23,73 @@ type GameOfLifeServer struct {
 	killReq        chan struct{}
 	World          [][]uint8
 
-	workerAddrs []string
-	workers     []*rpc.Client
+	workers        []*rpc.Client
+	allWorkers     []*rpc.Client
+	activeWorkers  int
 }
 
 // AdvanceWorld is RPC method that clients call to advance the world
 func (s *GameOfLifeServer) AdvanceWorld(request gol.GolRequest, response *gol.GolResponse) error {
-	world := request.World
+    world := request.World
 
-	s.lock.Lock()
-	s.completedTurns = 0
-	s.currentAlive = nil
-	s.flipped = nil
-	s.World = world
-	s.paused = false
-	s.lock.Unlock()
+    s.lock.Lock()
+    s.completedTurns = 0
+    s.currentAlive = nil
+    s.flipped = nil
+    s.World = world
+    s.paused = false
+    s.lock.Unlock()
 
-	if s.pauseReq == nil {
-		s.pauseReq = make(chan bool, 1)
-	}
-	if s.quitReq == nil {
-		s.quitReq = make(chan struct{})
-	}
-	if s.killReq == nil {
-		s.killReq = make(chan struct{})
-	}
+    if s.pauseReq == nil {
+        s.pauseReq = make(chan bool, 1)
+    }
+    if s.quitReq == nil {
+        s.quitReq = make(chan struct{})
+    }
+    if s.killReq == nil {
+        s.killReq = make(chan struct{})
+    }
 
-	for i := 0; i < request.Turns; i++ {
-		var quit bool
+    for i := 0; i < request.Turns; i++ {
+        var quit bool
 
-		// pause / quit handling unchanged
-		select {
-		case pause := <-s.pauseReq:
-			for pause {
-				select {
-				case pause = <-s.pauseReq:
-				case <-s.quitReq:
-					quit = true
-					pause = false
-				}
-			}
-		default:
-		}
-		if quit {
-			break
-		}
+        // pause / quit handling
+        select {
+        case pause := <-s.pauseReq:
+            for pause {
+                select {
+                case pause = <-s.pauseReq:
+                case <-s.quitReq:
+                    quit = true
+                    pause = false
+                }
+            }
+        default:
+        }
+        if quit {
+            break
+        }
 
-		s.lock.Lock()
-		newWorld, flipped := s.distributedStep(world)
-		world = newWorld
-		s.World = newWorld
-		s.currentAlive = gol.CalculateAliveCells(newWorld)
-		s.completedTurns = i + 1
-		s.flipped = flipped
-		s.lock.Unlock()
-	}
+        newWorld, flipped := s.distributedStep(world)
 
-	s.lock.Lock()
-	response.World = world
-	response.Alive = gol.CalculateAliveCells(world)
-	response.CompletedTurns = s.completedTurns
-	s.lock.Unlock()
+        s.lock.Lock()
+        world = newWorld
+        s.World = newWorld
+        s.currentAlive = gol.CalculateAliveCells(newWorld)
+        s.completedTurns = i + 1
+        s.flipped = flipped
+        s.lock.Unlock()
+    }
 
-	return nil
+    s.lock.Lock()
+    response.World = world
+    response.Alive = gol.CalculateAliveCells(world)
+    response.CompletedTurns = s.completedTurns
+    s.lock.Unlock()
+
+    return nil
 }
+
 
 // GetStatus returns alive cells and completed turns
 func (s *GameOfLifeServer) GetStatus(request gol.StatusRequest, response *gol.StatusResponse) error {
@@ -185,123 +188,145 @@ func (s *GameOfLifeServer) Kill(request gol.KillRequest, response *gol.KillRespo
 // }
 
 func main() {
-	// Hardcode worker private IPs
-	workerAddrs := []string{
-		"54.147.138.250:7000", // GOLEC2-2
-		"18.232.42.255:7000", // GOLEC2-3
-		"98.91.115.1:7000", // GOLEC2-4
-	}
+    // Hardcode worker private IPs
+    workerAddrs := []string{
+        "54.147.138.250:7000", // GOLEC2-2
+        "18.232.42.255:7000",  // GOLEC2-3
+        "98.91.115.1:7000",    // GOLEC2-4
+    }
 
-	srv := &GameOfLifeServer{
-		workerAddrs: workerAddrs,
-	}
+    srv := &GameOfLifeServer{}
 
-	// Dial workers
-	for _, addr := range workerAddrs {
-		cl, err := rpc.Dial("tcp", addr)
-		if err != nil {
-			panic(err)
-		}
-		srv.workers = append(srv.workers, cl)
-	}
+    // Dial ALL workers up front
+    for _, addr := range workerAddrs {
+        cl, err := rpc.Dial("tcp", addr)
+        if err != nil {
+            panic(err)
+        }
+        srv.allWorkers = append(srv.allWorkers, cl)
+    }
 
-	// Listen for client RPCs on all interfaces
-	rpc.Register(srv)
-	listener, err := net.Listen("tcp", ":7000")
-	if err != nil {
-		panic(err)
-	}
-	defer listener.Close()
+    // By default use all workers
+    srv.activeWorkers = len(srv.allWorkers)
+    srv.workers = srv.allWorkers[:srv.activeWorkers]
 
-	rpc.Accept(listener)
+    // Register RPC server (including ConfigureWorkers once you add it)
+    rpc.Register(srv)
+
+    // Listen for client RPCs
+    listener, err := net.Listen("tcp", ":7000")
+    if err != nil {
+        panic(err)
+    }
+    defer listener.Close()
+
+    rpc.Accept(listener)
 }
 
+
 func (s *GameOfLifeServer) distributedStep(world [][]uint8) ([][]uint8, []util.Cell) {
-	height := len(world)
-	width := len(world[0])
-	nWorkers := len(s.workers)
+    height := len(world)
+    width := len(world[0])
 
-	rowsPerWorker := height / nWorkers
-	extra := height % nWorkers
+    s.lock.Lock()
+    nWorkers := s.activeWorkers
 
-	// channel for worker results (just like parallel version)
-	type result struct {
-		startY  int
-		section [][]uint8
-		flipped []util.Cell
-	}
-	results := make(chan result, nWorkers)
+    workers := make([]*rpc.Client, nWorkers)
+    copy(workers, s.workers[:nWorkers])
+    s.lock.Unlock()
 
-	startRow := 0
+    rowsPerWorker := height / nWorkers
+    extra := height % nWorkers
 
-	// spawn RPC workers
-	for i := 0; i < nWorkers; i++ {
-		// determine row range for this worker
-		rows := rowsPerWorker
-		if i < extra {
-			rows++
-		}
-		endRow := startRow + rows
+    type result struct {
+        startY  int
+        section [][]uint8
+        flipped []util.Cell
+    }
 
-		// build halo chunk
-		topHalo := world[(startRow-1+height)%height] // row above start
-		bottomHalo := world[endRow%height]           // row below end
+    results := make(chan result, nWorkers)
+    startRow := 0
 
-		chunk := make([][]uint8, 0, rows+2)
-		chunk = append(chunk, topHalo)                   // halo above
-		chunk = append(chunk, world[startRow:endRow]...) // worker rows
-		chunk = append(chunk, bottomHalo)                // halo below
+    for i := 0; i < nWorkers; i++ {
+        rows := rowsPerWorker
+        if i < extra {
+            rows++
+        }
+        endRow := startRow + rows
 
-		req := gol.WorkerStepRequest{
-			Chunk:  chunk,
-			StartY: startRow,
-			Width:  width,
-			Height: len(chunk),
-		}
+        // build chunk with halo rows
+        topHalo := world[(startRow-1+height)%height]
+        bottomHalo := world[endRow%height]
 
-		worker := s.workers[i]
+        chunk := make([][]uint8, 0, rows+2)
+        chunk = append(chunk, topHalo)
+        chunk = append(chunk, world[startRow:endRow]...)
+        chunk = append(chunk, bottomHalo)
 
-		// make goroutine for RPC call
-		go func(start, end int) {
-			var resp gol.WorkerStepResponse
-			err := worker.Call("Worker.Step", req, &resp)
-			if err != nil {
-				panic(err)
-			}
+        // Build request here
+        req := gol.WorkerStepRequest{
+            Chunk:  chunk,
+            StartY: startRow,
+            Width:  width,
+            Height: len(chunk),
+        }
 
-			// send back results
-			results <- result{
-				startY:  start,
-				section: resp.NewInner,
-				flipped: resp.Flipped,
-			}
-		}(startRow, endRow)
+        // make a local copy of req so goroutines don't share it
+        localReq := req
+        worker := workers[i]
 
-		// startRow for the next worker is endRow for this one
-		startRow = endRow
-	}
+        go func(start, end int, r gol.WorkerStepRequest) {
+            var resp gol.WorkerStepResponse
+            if err := worker.Call("Worker.Step", r, &resp); err != nil {
+                panic(err)
+            }
 
-	// build new world
-	newWorld := make([][]uint8, height)
-	for i := range newWorld {
-		newWorld[i] = make([]uint8, width)
-	}
+            results <- result{
+                startY:  start,
+                section: resp.NewInner,
+                flipped: resp.Flipped,
+            }
+        }(startRow, endRow, localReq)
 
-	var allFlipped []util.Cell
+        startRow = endRow
+    }
 
-	// collect all results
-	for i := 0; i < nWorkers; i++ {
-		r := <-results
+    newWorld := make([][]uint8, height)
+    for i := range newWorld {
+        newWorld[i] = make([]uint8, width)
+    }
 
-		// copy worker’s computed rows into the new world
-		for j := range r.section {
-			newWorld[r.startY+j] = r.section[j]
-		}
+    var allFlipped []util.Cell
 
-		if len(r.flipped) > 0 {
-			allFlipped = append(allFlipped, r.flipped...)
-		}
-	}
+    for i := 0; i < nWorkers; i++ {
+        r := <-results
 
-	return newWorld, allFlipped
+        for j := range r.section {
+            newWorld[r.startY+j] = r.section[j]
+        }
+
+        if len(r.flipped) > 0 {
+            allFlipped = append(allFlipped, r.flipped...)
+        }
+    }
+
+    return newWorld, allFlipped
+}
+
+
+func (s *GameOfLifeServer) ConfigureWorkers(req gol.WorkerConfigRequest, res *gol.WorkerConfigResponse) error {
+    // clamp N
+    if req.NumWorkers < 1 {
+        req.NumWorkers = 1
+    }
+    if req.NumWorkers > len(s.allWorkers) {
+        req.NumWorkers = len(s.allWorkers)
+    }
+
+    s.lock.Lock()
+    s.activeWorkers = req.NumWorkers
+    s.workers = s.allWorkers[:req.NumWorkers]
+    s.lock.Unlock()
+
+    return nil
 }
