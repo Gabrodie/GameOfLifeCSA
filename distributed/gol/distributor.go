@@ -29,7 +29,7 @@ type distributorChannels struct {
 func distributor(p Params, c distributorChannels, keyPresses <-chan rune) {
 
 	// connect to the AWS server via rpc (localhost for now to test)
-	client, err := rpc.Dial("tcp", "34.202.166.88:7000")
+	client, err := rpc.Dial("tcp", "34.237.56.190:7000")
 	if err != nil {
 		panic(err)
 	}

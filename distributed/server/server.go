@@ -187,9 +187,9 @@ func (s *GameOfLifeServer) Kill(request gol.KillRequest, response *gol.KillRespo
 func main() {
 	// Hardcode worker private IPs
 	workerAddrs := []string{
-		"172.31.18.189:7000", // GOLEC2-2
-		"172.31.16.102:7000", // GOLEC2-3
-		"172.31.19.238:7000", // GOLEC2-4
+		"54.147.138.250:7000", // GOLEC2-2
+		"18.232.42.255:7000", // GOLEC2-3
+		"98.91.115.1:7000", // GOLEC2-4
 	}
 
 	srv := &GameOfLifeServer{
